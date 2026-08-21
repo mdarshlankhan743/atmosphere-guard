@@ -13,13 +13,17 @@ from aqi import pm25_to_aqi
 from preprocessing import build_feature_row
 from schemas import SensorInput
 
+
 DATA_DIR = Path(__file__).resolve().parent / "data"
 SNAPSHOT_PATH = DATA_DIR / "stations_snapshot.json"
+
 DELHI_DATASET_URL = (
-    "https://huggingface.co/datasets/sachin-iitd/DelhiPollDataset/resolve/main/test.csv"
+    "https://huggingface.co/datasets/sachin-iitd/DelhiPollDataset/"
+    "resolve/main/test.csv"
 )
 
-# Delhi NCR grid labels keyed by rounded lat/long pairs from the training dataset.
+
+# Delhi NCR grid labels keyed by rounded latitude/longitude.
 LOCATION_NAMES: dict[tuple[float, float], tuple[str, str]] = {
     (28.498, 77.294): ("Okhla Industrial", "South Delhi"),
     (28.624, 77.273): ("Civil Lines", "North Delhi"),
@@ -36,10 +40,16 @@ def _round_coord(value: float) -> float:
     return round(value, 3)
 
 
-def _location_label(lat: float, long: float, index: int) -> tuple[str, str]:
+def _location_label(
+    lat: float,
+    long: float,
+    index: int,
+) -> tuple[str, str]:
     key = (_round_coord(lat), _round_coord(long))
+
     if key in LOCATION_NAMES:
         return LOCATION_NAMES[key]
+
     return (f"Delhi Grid {index + 1}", "Delhi NCR")
 
 
@@ -52,29 +62,35 @@ def category_to_risk(category: str) -> str:
         "Very Unhealthy": "VERY_HIGH",
         "Hazardous": "CRITICAL",
     }
+
     return mapping.get(category, "UNKNOWN")
 
 
 def aqi_to_risk(aqi: int) -> str:
     if aqi <= 50:
         return "SAFE"
+
     if aqi <= 100:
         return "MODERATE"
-    if aqi <= 150:
-        return "HIGH"
+
     if aqi <= 200:
         return "HIGH"
+
     if aqi <= 300:
         return "VERY_HIGH"
+
     return "CRITICAL"
 
 
 def _trend(current_aqi: int, predicted_aqi: int) -> str:
     delta = predicted_aqi - current_aqi
+
     if delta >= 10:
         return "RISING"
+
     if delta <= -10:
         return "FALLING"
+
     return "STABLE"
 
 
@@ -97,39 +113,92 @@ def _row_to_sensor_input(row: pd.Series) -> SensorInput:
 
 def _prepare_dataset_frame(df: pd.DataFrame) -> pd.DataFrame:
     frame = df.copy()
-    frame["datetime"] = pd.to_datetime(frame["dateTime"], utc=True)
-    frame = frame.sort_values(["lat", "long", "datetime"])
+
+    frame["datetime"] = pd.to_datetime(
+        frame["dateTime"],
+        utc=True,
+    )
+
+    frame = frame.sort_values(
+        ["lat", "long", "datetime"]
+    )
 
     grouped = []
-    for (_, _), group in frame.groupby(["lat", "long"], sort=False):
+
+    for (_, _), group in frame.groupby(
+        ["lat", "long"],
+        sort=False,
+    ):
         part = group.copy()
+
         part["pm2_5_lag1"] = part["pm2_5"].shift(1)
         part["pm2_5_lag2"] = part["pm2_5"].shift(2)
         part["pm2_5_lag3"] = part["pm2_5"].shift(3)
+
         grouped.append(part)
 
-    ready = pd.concat(grouped, ignore_index=True)
-    ready = ready.dropna(subset=["pm2_5_lag1", "pm2_5_lag2", "pm2_5_lag3"])
-    ready = ready.sort_values("datetime", ascending=False)
+    if not grouped:
+        return pd.DataFrame()
+
+    ready = pd.concat(
+        grouped,
+        ignore_index=True,
+    )
+
+    ready = ready.dropna(
+        subset=[
+            "pm2_5_lag1",
+            "pm2_5_lag2",
+            "pm2_5_lag3",
+        ]
+    )
+
+    ready = ready.sort_values(
+        "datetime",
+        ascending=False,
+    )
+
     return ready
 
 
-def _download_latest_snapshots(max_locations: int = 8) -> list[dict[str, Any]]:
+def _download_latest_snapshots(
+    max_locations: int = 8,
+) -> list[dict[str, Any]]:
     df = pd.read_csv(DELHI_DATASET_URL)
+
     ready = _prepare_dataset_frame(df)
 
+    if ready.empty:
+        raise RuntimeError(
+            "DelhiPollDataset did not contain enough historical "
+            "PM2.5 readings to create lag features."
+        )
+
     snapshots: list[dict[str, Any]] = []
+
     seen: set[tuple[float, float]] = set()
 
     for _, row in ready.iterrows():
-        key = (_round_coord(float(row["lat"])), _round_coord(float(row["long"])))
+        key = (
+            _round_coord(float(row["lat"])),
+            _round_coord(float(row["long"])),
+        )
+
         if key in seen:
             continue
+
         seen.add(key)
 
-        dt = pd.Timestamp(row["datetime"]).to_pydatetime()
+        dt = pd.Timestamp(
+            row["datetime"]
+        ).to_pydatetime()
+
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone(timedelta(hours=5, minutes=30)))
+            dt = dt.replace(
+                tzinfo=timezone(
+                    timedelta(hours=5, minutes=30)
+                )
+            )
 
         snapshots.append(
             {
@@ -151,35 +220,90 @@ def _download_latest_snapshots(max_locations: int = 8) -> list[dict[str, Any]]:
         if len(snapshots) >= max_locations:
             break
 
+    if not snapshots:
+        raise RuntimeError(
+            "No valid Delhi sensor snapshots were found."
+        )
+
     return snapshots
 
 
-def load_sensor_snapshots(force_refresh: bool = False) -> list[dict[str, Any]]:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+def load_sensor_snapshots(
+    force_refresh: bool = False,
+) -> list[dict[str, Any]]:
+    DATA_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     if SNAPSHOT_PATH.exists() and not force_refresh:
-        with SNAPSHOT_PATH.open("r", encoding="utf-8") as handle:
+        with SNAPSHOT_PATH.open(
+            "r",
+            encoding="utf-8",
+        ) as handle:
             payload = json.load(handle)
-        return payload["snapshots"]
+
+        snapshots = payload.get("snapshots", [])
+
+        if snapshots:
+            return snapshots
 
     snapshots = _download_latest_snapshots()
-    with SNAPSHOT_PATH.open("w", encoding="utf-8") as handle:
-        json.dump({"source": DELHI_DATASET_URL, "snapshots": snapshots}, handle, indent=2)
+
+    with SNAPSHOT_PATH.open(
+        "w",
+        encoding="utf-8",
+    ) as handle:
+        json.dump(
+            {
+                "source": DELHI_DATASET_URL,
+                "snapshots": snapshots,
+            },
+            handle,
+            indent=2,
+        )
+
     return snapshots
 
 
-def predict_location(model: Any, snapshot: dict[str, Any], index: int) -> dict[str, Any]:
+def predict_location(
+    model: Any,
+    snapshot: dict[str, Any],
+    index: int,
+) -> dict[str, Any]:
     row = pd.Series(snapshot)
-    row["datetime"] = pd.Timestamp(snapshot["datetime"])
+
+    row["datetime"] = pd.Timestamp(
+        snapshot["datetime"]
+    )
+
     sensor = _row_to_sensor_input(row)
 
-    current_aqi, current_category = pm25_to_aqi(sensor.pm2_5)
-    features = build_feature_row(sensor)
-    predicted_pm25 = float(model.predict(features)[0])
-    predicted_aqi, predicted_category = pm25_to_aqi(predicted_pm25)
+    current_aqi, current_category = pm25_to_aqi(
+        sensor.pm2_5
+    )
 
-    name, region = _location_label(sensor.lat, sensor.long, index)
-    location_id = f"loc-{index + 1:02d}-{_round_coord(sensor.lat)}-{_round_coord(sensor.long)}"
+    features = build_feature_row(sensor)
+
+    predicted_pm25 = float(
+        model.predict(features)[0]
+    )
+
+    predicted_aqi, predicted_category = pm25_to_aqi(
+        predicted_pm25
+    )
+
+    name, region = _location_label(
+        sensor.lat,
+        sensor.long,
+        index,
+    )
+
+    location_id = (
+        f"loc-{index + 1:02d}-"
+        f"{_round_coord(sensor.lat)}-"
+        f"{_round_coord(sensor.long)}"
+    )
 
     return {
         "id": location_id,
@@ -189,108 +313,292 @@ def predict_location(model: Any, snapshot: dict[str, Any], index: int) -> dict[s
         "lng": sensor.long,
         "currentAQI": current_aqi,
         "predictedAQI": predicted_aqi,
-        "riskLevel": aqi_to_risk(max(current_aqi, predicted_aqi)),
-        "trend": _trend(current_aqi, predicted_aqi),
-        "pm25Current": round(sensor.pm2_5, 2),
-        "pm25Predicted": round(predicted_pm25, 2),
-        "temperature": round(sensor.temperature, 2),
-        "humidity": round(sensor.humidity, 2),
+        "riskLevel": aqi_to_risk(
+            max(current_aqi, predicted_aqi)
+        ),
+        "trend": _trend(
+            current_aqi,
+            predicted_aqi,
+        ),
+        "pm25Current": round(
+            sensor.pm2_5,
+            2,
+        ),
+        "pm25Predicted": round(
+            predicted_pm25,
+            2,
+        ),
+        "temperature": round(
+            sensor.temperature,
+            2,
+        ),
+        "humidity": round(
+            sensor.humidity,
+            2,
+        ),
         "windSpeed": None,
         "windDirection": None,
         "factors": [
             {
                 "id": "pm25",
                 "name": "PM2.5",
-                "level": "High" if sensor.pm2_5 >= 55.4 else "Moderate" if sensor.pm2_5 >= 35.5 else "Low",
-                "description": f"Observed PM2.5 {sensor.pm2_5:.1f} µg/m³ ({current_category})",
-                "impactScore": min(100, int(current_aqi / 5)),
+                "level": (
+                    "High"
+                    if sensor.pm2_5 >= 55.4
+                    else (
+                        "Moderate"
+                        if sensor.pm2_5 >= 35.5
+                        else "Low"
+                    )
+                ),
+                "description": (
+                    f"Observed PM2.5 "
+                    f"{sensor.pm2_5:.1f} µg/m³ "
+                    f"({current_category})"
+                ),
+                "impactScore": min(
+                    100,
+                    int(current_aqi / 5),
+                ),
             },
             {
                 "id": "humidity",
                 "name": "Humidity",
-                "level": "High" if sensor.humidity >= 70 else "Moderate" if sensor.humidity >= 40 else "Low",
-                "description": f"Relative humidity {sensor.humidity:.1f}%",
-                "impactScore": min(100, int(sensor.humidity)),
+                "level": (
+                    "High"
+                    if sensor.humidity >= 70
+                    else (
+                        "Moderate"
+                        if sensor.humidity >= 40
+                        else "Low"
+                    )
+                ),
+                "description": (
+                    f"Relative humidity "
+                    f"{sensor.humidity:.1f}%"
+                ),
+                "impactScore": min(
+                    100,
+                    int(sensor.humidity),
+                ),
             },
         ],
         "explanation": (
-            f"Random Forest predicts PM2.5 will move from {sensor.pm2_5:.1f} to "
-            f"{predicted_pm25:.1f} µg/m³ ({current_category} → {predicted_category})."
+            f"Random Forest predicts PM2.5 "
+            f"will move from {sensor.pm2_5:.1f} "
+            f"to {predicted_pm25:.1f} µg/m³ "
+            f"({current_category} → "
+            f"{predicted_category})."
         ),
-        "sensorInput": sensor.model_dump(mode="json"),
+        "sensorInput": sensor.model_dump(
+            mode="json"
+        ),
         "currentCategory": current_category,
         "predictedCategory": predicted_category,
     }
 
 
-def build_forecast_series(selected: dict[str, Any]) -> list[dict[str, Any]]:
-    observed = selected["currentAQI"]
-    predicted = selected["predictedAQI"]
-    base_time = datetime.fromisoformat(selected["sensorInput"]["datetime"])
+def build_forecast_series(
+    selected: dict[str, Any],
+    model: Any,
+) -> list[dict[str, Any]]:
+    """
+    Build recursive 1-hour forecasts out to +6H.
 
-    horizons = [
-        ("Now", base_time, observed, observed),
-        ("+1H", base_time + timedelta(hours=1), None, predicted),
-        ("+2H", base_time + timedelta(hours=2), None, None),
-        ("+4H", base_time + timedelta(hours=4), None, None),
-        ("+6H", base_time + timedelta(hours=6), None, None),
+    The saved Random Forest model predicts one hour ahead.
+    For longer horizons, each prediction is fed back into
+    the next prediction as the newest PM2.5 value.
+    """
+
+    if model is None:
+        raise RuntimeError(
+            "Prediction model is not available."
+        )
+
+    sensor = SensorInput.model_validate(
+        selected["sensorInput"]
+    )
+
+    observed_aqi = selected["currentAQI"]
+
+    base_time = sensor.datetime
+
+    current_pm25 = sensor.pm2_5
+    lag1 = sensor.pm2_5_lag1
+    lag2 = sensor.pm2_5_lag2
+    lag3 = sensor.pm2_5_lag3
+
+    series: list[dict[str, Any]] = [
+        {
+            "timeLabel": "Now",
+            "timestamp": base_time.isoformat(),
+            "observedAQI": observed_aqi,
+            "predictedAQI": observed_aqi,
+        }
     ]
 
-    series: list[dict[str, Any]] = []
-    for label, timestamp, observed_aqi, predicted_aqi in horizons:
-        point: dict[str, Any] = {
-            "timeLabel": label,
-            "timestamp": timestamp.isoformat(),
-            "observedAQI": observed_aqi,
-            "predictedAQI": predicted_aqi,
-        }
-        if predicted_aqi is not None and label != "Now":
-            margin = max(5, int(predicted_aqi * 0.08))
-            point["lowerBound"] = max(0, predicted_aqi - margin)
-            point["upperBound"] = min(500, predicted_aqi + margin)
-        series.append(point)
+    predictions: dict[int, float] = {}
+
+    for hour in range(1, 7):
+        forecast_sensor = sensor.model_copy(
+            update={
+                "datetime": (
+                    base_time
+                    + timedelta(hours=hour)
+                ),
+                "pm2_5": current_pm25,
+                "pm2_5_lag1": lag1,
+                "pm2_5_lag2": lag2,
+                "pm2_5_lag3": lag3,
+            }
+        )
+
+        features = build_feature_row(
+            forecast_sensor
+        )
+
+        predicted_pm25 = float(
+            model.predict(features)[0]
+        )
+
+        predictions[hour] = predicted_pm25
+
+        # Shift PM2.5 history forward.
+        lag3 = lag2
+        lag2 = lag1
+        lag1 = current_pm25
+        current_pm25 = predicted_pm25
+
+    # Only expose the horizons required by the UI.
+    for hour, label in [
+        (1, "+1H"),
+        (2, "+2H"),
+        (4, "+4H"),
+        (6, "+6H"),
+    ]:
+        predicted_aqi, _ = pm25_to_aqi(
+            predictions[hour]
+        )
+
+        timestamp = (
+            base_time
+            + timedelta(hours=hour)
+        )
+
+        margin = max(
+            5,
+            int(predicted_aqi * 0.08),
+        )
+
+        series.append(
+            {
+                "timeLabel": label,
+                "timestamp": timestamp.isoformat(),
+                "observedAQI": None,
+                "predictedAQI": predicted_aqi,
+                "lowerBound": max(
+                    0,
+                    predicted_aqi - margin,
+                ),
+                "upperBound": min(
+                    500,
+                    predicted_aqi + margin,
+                ),
+            }
+        )
+
     return series
 
 
-def build_alerts(locations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def build_alerts(
+    locations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     alerts: list[dict[str, Any]] = []
+
     for location in locations:
         predicted = location["predictedAQI"]
-        risk = aqi_to_risk(predicted)
+
         if predicted < 151:
             continue
 
-        severity = "HIGH" if predicted < 201 else "VERY_HIGH" if predicted < 301 else "CRITICAL"
+        if predicted < 201:
+            severity = "HIGH"
+        elif predicted < 301:
+            severity = "VERY_HIGH"
+        else:
+            severity = "CRITICAL"
+
         alerts.append(
             {
                 "id": f"alert-{location['id']}",
                 "severity": severity,
                 "area": location["name"],
                 "message": (
-                    f"Predicted AQI {predicted} ({location['predictedCategory']}) in the next hour. "
-                    f"Trend is {location['trend'].lower()}."
+                    f"Predicted AQI {predicted} "
+                    f"({location['predictedCategory']}) "
+                    f"in the next hour. "
+                    f"Trend is "
+                    f"{location['trend'].lower()}."
                 ),
-                "timestamp": location["sensorInput"]["datetime"],
+                "timestamp": location[
+                    "sensorInput"
+                ]["datetime"],
                 "status": "Active",
-                "suggestedAction": "Limit outdoor exposure and monitor sensitive groups.",
-                "expectedDirection": location["trend"],
+                "suggestedAction": (
+                    "Limit outdoor exposure and "
+                    "monitor sensitive groups."
+                ),
+                "expectedDirection": location[
+                    "trend"
+                ],
                 "forecastPeriod": "+1H",
             }
         )
 
-    alerts.sort(key=lambda item: item["severity"], reverse=True)
+    # Keep most severe alerts first.
+    severity_order = {
+        "CRITICAL": 3,
+        "VERY_HIGH": 2,
+        "HIGH": 1,
+    }
+
+    alerts.sort(
+        key=lambda item: severity_order.get(
+            item["severity"],
+            0,
+        ),
+        reverse=True,
+    )
+
     return alerts
 
 
-def build_priority_list(locations: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    ranked = sorted(locations, key=lambda loc: loc["predictedAQI"], reverse=True)
+def build_priority_list(
+    locations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    ranked = sorted(
+        locations,
+        key=lambda loc: loc["predictedAQI"],
+        reverse=True,
+    )
+
     priorities: list[dict[str, Any]] = []
-    for index, location in enumerate(ranked[:5], start=1):
-        action = (
-            "Deploy mobile monitoring and issue public advisory."
-            if location["predictedAQI"] >= 200
-            else "Increase sampling frequency and track trend."
-        )
+
+    for index, location in enumerate(
+        ranked[:5],
+        start=1,
+    ):
+        if location["predictedAQI"] >= 200:
+            action = (
+                "Deploy mobile monitoring and "
+                "issue public advisory."
+            )
+        else:
+            action = (
+                "Increase sampling frequency "
+                "and track trend."
+            )
+
         priorities.append(
             {
                 "priority": index,
@@ -303,6 +611,7 @@ def build_priority_list(locations: list[dict[str, Any]]) -> list[dict[str, Any]]
                 "recommendedAction": action,
             }
         )
+
     return priorities
 
 
@@ -310,68 +619,168 @@ class DashboardService:
     def __init__(self) -> None:
         self._locations: list[dict[str, Any]] = []
         self._last_updated: str | None = None
+        self._model: Any = None
 
-    def refresh(self, model: Any, force_dataset_refresh: bool = False) -> None:
-        snapshots = load_sensor_snapshots(force_refresh=force_dataset_refresh)
-        self._locations = [predict_location(model, snapshot, index) for index, snapshot in enumerate(snapshots)]
-        self._last_updated = datetime.now(timezone.utc).isoformat()
+    def refresh(
+        self,
+        model: Any,
+        force_dataset_refresh: bool = False,
+    ) -> None:
+        self._model = model
+
+        snapshots = load_sensor_snapshots(
+            force_refresh=force_dataset_refresh
+        )
+
+        self._locations = [
+            predict_location(
+                model,
+                snapshot,
+                index,
+            )
+            for index, snapshot in enumerate(
+                snapshots
+            )
+        ]
+
+        self._last_updated = (
+            datetime.now(
+                timezone.utc
+            ).isoformat()
+        )
 
     @property
     def locations(self) -> list[dict[str, Any]]:
         return self._locations
 
-    def get_location(self, location_id: str) -> dict[str, Any] | None:
+    def get_location(
+        self,
+        location_id: str,
+    ) -> dict[str, Any] | None:
         for location in self._locations:
             if location["id"] == location_id:
                 return location
+
         return None
 
-    def build_dashboard(self, selected_location_id: str | None = None) -> dict[str, Any]:
+    def build_dashboard(
+        self,
+        selected_location_id: str | None = None,
+    ) -> dict[str, Any]:
         if not self._locations:
-            raise RuntimeError("Dashboard data has not been loaded yet")
+            raise RuntimeError(
+                "Dashboard data has not been loaded yet"
+            )
 
         selected = self._locations[0]
+
         if selected_location_id:
-            found = self.get_location(selected_location_id)
+            found = self.get_location(
+                selected_location_id
+            )
+
             if found is not None:
                 selected = found
 
-        public_locations = [{key: value for key, value in loc.items() if key != "sensorInput"} for loc in self._locations]
-        public_selected = {key: value for key, value in selected.items() if key != "sensorInput"}
+        public_locations = [
+            {
+                key: value
+                for key, value in location.items()
+                if key != "sensorInput"
+            }
+            for location in self._locations
+        ]
 
-        hotspots = sum(1 for loc in self._locations if loc["predictedAQI"] >= 151)
-        rising = sum(1 for loc in self._locations if loc["trend"] == "RISING")
-        alerts = build_alerts(self._locations)
+        public_selected = {
+            key: value
+            for key, value in selected.items()
+            if key != "sensorInput"
+        }
 
-        max_predicted = max(loc["predictedAQI"] for loc in self._locations)
-        avg_current = round(sum(loc["currentAQI"] for loc in self._locations) / len(self._locations))
+        hotspots = sum(
+            1
+            for location in self._locations
+            if location["predictedAQI"] >= 151
+        )
+
+        rising = sum(
+            1
+            for location in self._locations
+            if location["trend"] == "RISING"
+        )
+
+        alerts = build_alerts(
+            self._locations
+        )
+
+        max_predicted = max(
+            location["predictedAQI"]
+            for location in self._locations
+        )
+
+        avg_current = round(
+            sum(
+                location["currentAQI"]
+                for location in self._locations
+            )
+            / len(self._locations)
+        )
 
         return {
             "metrics": {
                 "currentAQI": avg_current,
                 "forecastAQI": max_predicted,
-                "riskLevel": aqi_to_risk(max_predicted),
+                "riskLevel": aqi_to_risk(
+                    max_predicted
+                ),
                 "hotspotsCount": hotspots,
                 "risingAreasCount": rising,
-                "activeAlertsCount": len([alert for alert in alerts if alert["status"] == "Active"]),
+                "activeAlertsCount": len(
+                    [
+                        alert
+                        for alert in alerts
+                        if alert["status"] == "Active"
+                    ]
+                ),
             },
             "selectedLocation": public_selected,
             "locations": public_locations,
-            "forecastSeries": build_forecast_series(selected),
+            "forecastSeries": build_forecast_series(
+                selected,
+                self._model,
+            ),
             "alerts": alerts,
-            "priorityList": build_priority_list(self._locations),
+            "priorityList": build_priority_list(
+                self._locations
+            ),
             "lastUpdated": self._last_updated,
         }
 
-    def build_forecast(self, location_id: str | None = None) -> dict[str, Any]:
+    def build_forecast(
+        self,
+        location_id: str | None = None,
+    ) -> dict[str, Any]:
+        if not self._locations:
+            raise RuntimeError(
+                "Dashboard data has not been loaded yet"
+            )
+
         selected = self._locations[0]
+
         if location_id:
-            found = self.get_location(location_id)
+            found = self.get_location(
+                location_id
+            )
+
             if found is not None:
                 selected = found
+
         return {
             "locationId": selected["id"],
-            "series": build_forecast_series(selected),
+            "series": build_forecast_series(
+                selected,
+                self._model,
+            ),
             "currentAQI": selected["currentAQI"],
             "predictedAQI": selected["predictedAQI"],
         }
