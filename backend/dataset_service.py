@@ -227,7 +227,6 @@ def _download_latest_snapshots(
 
     return snapshots
 
-
 def load_sensor_snapshots(
     force_refresh: bool = False,
 ) -> list[dict[str, Any]]:
@@ -236,7 +235,7 @@ def load_sensor_snapshots(
         exist_ok=True,
     )
 
-    if SNAPSHOT_PATH.exists() and not force_refresh:
+    if SNAPSHOT_PATH.exists():
         with SNAPSHOT_PATH.open(
             "r",
             encoding="utf-8",
@@ -248,6 +247,7 @@ def load_sensor_snapshots(
         if snapshots:
             return snapshots
 
+    # Only download from Hugging Face if the local snapshot is missing.
     snapshots = _download_latest_snapshots()
 
     with SNAPSHOT_PATH.open(
@@ -264,6 +264,7 @@ def load_sensor_snapshots(
         )
 
     return snapshots
+
 
 
 def predict_location(
