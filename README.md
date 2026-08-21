@@ -8,7 +8,7 @@ AirGuard AI is an air-quality forecasting and early-warning platform for Delhi. 
 
 **Team Backtrackers** — NIET · Priyanshu Gupta (Lead), MD Arshlan Khan, Shivam Maddheshiya, Krashn Kumar
 
-🔗 **Live prototype:** [airguard-ai-iota.vercel.app](https://atmosphere-guard-final.vercel.app/)
+🔗 **Live prototype:** [airguard-final.vercel.app](https://atmosphere-guard-final.vercel.app/)
 
 ## Features
 
